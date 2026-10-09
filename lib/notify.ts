@@ -2,7 +2,7 @@ import "server-only";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { sendMail } from "@/lib/email";
 import { applicationStatusLabels, site } from "@/lib/content";
-import type { ApplicationStatus } from "@/types/database";
+import type { ApplicationStatus, JobAlert } from "@/types/database";
 
 type NotifiableProfile = { email: string; notify_email: boolean };
 
@@ -211,4 +211,101 @@ export async function notifyAdminPendingReview(jobTitle: string): Promise<void> 
     text: `${body}\n\nReview it: ${url}`,
     html: `<p>${body}</p><p><a href="${url}">Review it</a></p>`,
   });
+}
+
+type AlertJob = {
+  id: string;
+  title: string;
+  slug: string;
+  category_id: string | null;
+  location_id: string | null;
+  job_type: string | null;
+  created_at: string;
+};
+
+/**
+ * Trigger 6 — job alerts digest. Called once a day by the Vercel Cron in
+ * vercel.json, via app/api/cron/job-alerts/route.ts.
+ *
+ * `job_alerts` and its CRUD UI (app/dashboard/seeker/alerts/) already
+ * existed; this is the missing half that makes an alert do something. One
+ * query for all active alerts, one for the widest possible window of
+ * published jobs (7 days — the longest any alert's frequency needs), then
+ * matched in memory per alert rather than one job query per alert.
+ *
+ * `last_sent_at` doubles as "last processed", not just "last emailed" — it
+ * advances every run regardless of match count so a daily alert's window
+ * never gaps or double-counts. A weekly alert not yet due this run is left
+ * untouched entirely, so its window keeps accumulating toward the next send.
+ */
+export async function runJobAlertDigest(): Promise<void> {
+  const admin = createAdminClient();
+  const now = Date.now();
+
+  const { data: alertRows } = await admin
+    .from("job_alerts")
+    .select("*")
+    .eq("is_active", true);
+  const alerts = (alertRows as JobAlert[] | null) ?? [];
+  if (alerts.length === 0) return;
+
+  const since = new Date(now - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const { data: jobRows } = await admin
+    .from("jobs")
+    .select("id, title, slug, category_id, location_id, job_type, created_at")
+    .eq("status", "published")
+    .gte("created_at", since);
+  const jobs = (jobRows as AlertJob[] | null) ?? [];
+
+  for (const alert of alerts) {
+    const isWeekly = alert.frequency === "weekly";
+    const windowMs = (isWeekly ? 7 : 1) * 24 * 60 * 60 * 1000;
+    const lastSent = alert.last_sent_at ? new Date(alert.last_sent_at).getTime() : null;
+
+    if (isWeekly && lastSent !== null && now - lastSent < windowMs) {
+      continue; // Not due yet — last_sent_at stays as-is.
+    }
+
+    const windowStart = lastSent ?? now - windowMs;
+    let matches = jobs.filter((job) => {
+      if (new Date(job.created_at).getTime() < windowStart) return false;
+      if (alert.category_id && job.category_id !== alert.category_id) return false;
+      if (alert.location_id && job.location_id !== alert.location_id) return false;
+      if (alert.job_type && job.job_type !== alert.job_type) return false;
+      return true;
+    });
+
+    if (alert.keyword && matches.length > 0) {
+      // The pre-filtered batch above is at most a week of published jobs, so
+      // a text-search call per keyword alert is cheap — no need to pull fts
+      // into memory to match it by hand.
+      const ids = matches.map((j) => j.id);
+      const { data: searched } = await admin
+        .from("jobs")
+        .select("id")
+        .in("id", ids)
+        .textSearch("fts", alert.keyword, { type: "websearch" });
+      const keep = new Set(((searched as { id: string }[] | null) ?? []).map((r) => r.id));
+      matches = matches.filter((j) => keep.has(j.id));
+    }
+
+    if (matches.length > 0) {
+      const text = matches.map((j) => `- ${j.title}: ${link(`/jobs/${j.slug}`)}`).join("\n");
+      const html = matches
+        .map((j) => `<li><a href="${link(`/jobs/${j.slug}`)}">${j.title}</a></li>`)
+        .join("");
+      await sendMail({
+        to: alert.email,
+        subject:
+          matches.length === 1 ? `New job match: ${matches[0].title}` : `${matches.length} new job matches`,
+        text: `New roles matching your alert:\n\n${text}`,
+        html: `<p>New roles matching your alert:</p><ul>${html}</ul>`,
+      });
+    }
+
+    await admin
+      .from("job_alerts")
+      .update({ last_sent_at: new Date(now).toISOString() })
+      .eq("id", alert.id);
+  }
 }
