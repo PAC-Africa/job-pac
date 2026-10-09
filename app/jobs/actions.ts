@@ -140,7 +140,7 @@ export async function submitApplication(formData: FormData) {
     const { data: profile } = await supabase
       .from("profiles")
       .select(
-        "role, cv_url, suspended_at, full_name, phone, years_experience, education_level, industry_category_id"
+        "role, cv_url, suspended_at, full_name, phone, years_experience, education_level, industry_category_id, skills"
       )
       .eq("id", user.id)
       .single();
@@ -155,6 +155,7 @@ export async function submitApplication(formData: FormData) {
       years_experience: number | null;
       education_level: EducationLevel | null;
       industry_category_id: string | null;
+      skills: string[] | null;
     };
 
     // Both are also enforced in the database (migration 022 for suspension, the

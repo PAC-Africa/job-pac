@@ -25,17 +25,17 @@ export function profileChecklist(
     {
       label: "Your name",
       done: Boolean(profile.full_name?.trim()),
-      why: "Employers see this instead of your email address.",
+      why: "Employers see this instead of your email address. Required to unlock Applications.",
     },
     {
       label: "CV attached",
       done: hasCv,
-      why: "Usually the first thing an employer opens.",
+      why: "Usually the first thing an employer opens. Required to unlock Applications.",
     },
     {
       label: "Phone number",
       done: Boolean(profile.phone?.trim()),
-      why: "How most employers here make first contact.",
+      why: "How most employers here make first contact. Required to unlock Applications.",
     },
     {
       label: "Headline",
@@ -45,7 +45,7 @@ export function profileChecklist(
     {
       label: "Skills",
       done: Boolean(profile.skills?.length),
-      why: "Lets us point you at roles that match.",
+      why: "Lets us point you at roles that match. Counts toward the 3 of 4 needed to unlock Applications.",
     },
     {
       label: "Location",
@@ -55,59 +55,108 @@ export function profileChecklist(
     {
       label: "Years of experience",
       done: profile.years_experience !== null,
-      why: "Lets employers gauge seniority at a glance.",
+      why: "Lets employers gauge seniority at a glance. Counts toward the 3 of 4 needed to unlock Applications.",
     },
     {
       label: "Education level",
       done: profile.education_level !== null,
-      why: "Some roles filter by minimum education.",
+      why: "Some roles filter by minimum education. Counts toward the 3 of 4 needed to unlock Applications.",
     },
     {
       label: "Industry",
       done: profile.industry_category_id !== null,
-      why: "Helps us point you at roles in your field.",
+      why: "Helps us point you at roles in your field. Counts toward the 3 of 4 needed to unlock Applications.",
     },
     {
       label: "Education history",
       done: hasEducation,
-      why: "At least one entry — school, field of study, and years attended.",
+      why: "At least one entry — school, field of study, and years attended. Required to unlock Applications.",
     },
     {
       label: "Work experience",
       done: hasWorkExperience,
-      why: "At least one entry — employer, title, and dates.",
+      why: "At least one entry — employer, title, and dates. Required to unlock Applications.",
     },
   ];
 }
 
+/** Percentage of the pool (below) that must be filled, on top of every
+ * hard-required field, to pass the gate. Not 100%: skills/years/education
+ * level/industry each matter, but none alone is as operationally critical
+ * as a name, phone, CV, or real history — so 3 of these 4 is enough. */
+const GATE_POOL_THRESHOLD = 70;
+
+export type ProfileGateStatus = {
+  complete: boolean;
+  /** Percentage of the 4-item pool filled in, independent of whether the
+   * hard-required fields are also done — lets the UI show "3 of 4" even
+   * to someone who still hasn't uploaded a CV. */
+  poolPercent: number;
+};
+
 /**
- * The smaller "must-have" subset of profileChecklist that actually gates
- * dashboard features (Saved, Alerts, Applications, and applying — see
- * lib/auth.ts and app/jobs/actions.ts). Widened beyond name/phone/CV to also
- * require the migration-033 hiring fields, after too many profiles were left
- * unfinished once those fields launched as nudge-only. Kept as its own
- * function (rather than "checklist 100%") so bio/headline/skills/location
- * stay optional nudges, never gates — only the items below actually block.
+ * The gate that actually locks dashboard features (Saved, Alerts,
+ * Applications, and applying — see lib/auth.ts and app/jobs/actions.ts).
+ * A hybrid, not a single pass/fail list and not a pure percentage either:
+ *
+ *  - Hard-required, every one, no exceptions: name, phone, CV, at least one
+ *    education entry, at least one work-experience entry. Each is something
+ *    an employer cannot act on an application without.
+ *  - Pool, needs GATE_POOL_THRESHOLD%: skills, years of experience,
+ *    education level, industry. Each matters, but requiring all four
+ *    individually blocked seekers (e.g. a recent graduate with no industry
+ *    pick yet) over fields that help rather than gate.
+ *
+ * bio/headline/location stay outside both lists entirely — pure nudges in
+ * profileChecklist, never gating.
  */
+export function profileGateStatus(
+  profile: Pick<
+    Profile,
+    | "full_name"
+    | "phone"
+    | "years_experience"
+    | "education_level"
+    | "industry_category_id"
+    | "skills"
+  >,
+  hasCv: boolean,
+  hasEducation: boolean,
+  hasWorkExperience: boolean
+): ProfileGateStatus {
+  const hardRequired =
+    Boolean(profile.full_name?.trim()) &&
+    Boolean(profile.phone?.trim()) &&
+    hasCv &&
+    hasEducation &&
+    hasWorkExperience;
+
+  const pool = [
+    Boolean(profile.skills?.length),
+    profile.years_experience !== null,
+    profile.education_level !== null,
+    profile.industry_category_id !== null,
+  ];
+  const poolPercent = Math.round((pool.filter(Boolean).length / pool.length) * 100);
+
+  return { complete: hardRequired && poolPercent >= GATE_POOL_THRESHOLD, poolPercent };
+}
+
 export function isProfileGateComplete(
   profile: Pick<
     Profile,
-    "full_name" | "phone" | "years_experience" | "education_level" | "industry_category_id"
+    | "full_name"
+    | "phone"
+    | "years_experience"
+    | "education_level"
+    | "industry_category_id"
+    | "skills"
   >,
   hasCv: boolean,
   hasEducation: boolean,
   hasWorkExperience: boolean
 ): boolean {
-  return (
-    Boolean(profile.full_name?.trim()) &&
-    Boolean(profile.phone?.trim()) &&
-    hasCv &&
-    profile.years_experience !== null &&
-    profile.education_level !== null &&
-    profile.industry_category_id !== null &&
-    hasEducation &&
-    hasWorkExperience
-  );
+  return profileGateStatus(profile, hasCv, hasEducation, hasWorkExperience).complete;
 }
 
 export function completeness(checks: ProfileCheck[]): {
