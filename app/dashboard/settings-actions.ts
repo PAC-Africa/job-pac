@@ -3,6 +3,7 @@
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { requireUser, dashboardPathFor } from "@/lib/auth";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { navFor } from "@/lib/dashboard-nav";
 import { dash } from "@/lib/content";
 import type { Profile } from "@/types/database";
@@ -100,4 +101,52 @@ export async function updateDashboardPrefs(formData: FormData) {
 
   revalidatePath("/dashboard", "layout");
   redirect(`${base}?updated=preferences`);
+}
+
+/**
+ * Seeker self-service account deletion. Employer/admin still use the mailto
+ * in components/settings-panel.tsx — deleting an employer cascades into their
+ * jobs and other seekers' applications to those jobs, a different, harder
+ * policy question that hasn't been decided yet.
+ *
+ * Order matters: applications.applicant_id is ON DELETE SET NULL (not
+ * cascade, by design — the application itself survives), so the PII on the
+ * applicant's own rows has to be scrubbed first, while applicant_id can still
+ * find them. profiles.id is ON DELETE CASCADE from auth.users, which also
+ * cascades to saved_jobs and job_alerts — deleteUser() alone cleans those up.
+ *
+ * applicant_email is NOT NULL and carries a unique(job_id, lower(email))
+ * index (migration 013), so it's replaced with a per-row placeholder rather
+ * than a shared one, which would collide across rows on the same job.
+ */
+export async function deleteSeekerAccount() {
+  const { profile } = await requireUser();
+  if (profile.role !== "seeker") redirect(`${dashboardPathFor(profile.role)}/settings`);
+
+  const admin = createAdminClient();
+
+  const { data: applications } = await admin
+    .from("applications")
+    .select("id")
+    .eq("applicant_id", profile.id);
+
+  for (const application of (applications as { id: string }[] | null) ?? []) {
+    await admin
+      .from("applications")
+      .update({
+        applicant_name: "Deleted user",
+        applicant_email: `deleted-${application.id}@deleted.pac.africa`,
+        applicant_phone: null,
+        cover_letter: null,
+        cv_url: null,
+      })
+      .eq("id", application.id);
+  }
+
+  const { error } = await admin.auth.admin.deleteUser(profile.id);
+  if (error) {
+    redirect(`${dashboardPathFor("seeker")}/settings?error=${encodeURIComponent(error.message)}`);
+  }
+
+  redirect("/auth/account-deleted");
 }

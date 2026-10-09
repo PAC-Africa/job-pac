@@ -617,6 +617,11 @@ export const dash = {
     dataDelete: "Request deletion",
     dataDeleteHint:
       "We remove your profile, your CV and your saved roles. Applications you already sent are kept where an employer needs them for their own records, with your name removed.",
+    /** Seeker-only — employer/admin still use the mailto above (dataDelete). */
+    dataDeleteCta: "Delete my account",
+    dataDeleteConfirmTitle: "Delete your account?",
+    dataDeleteConfirmBody:
+      "Your profile, CV, saved roles and job alerts are removed immediately and you are signed out. Applications you already sent stay with the employer for their records, with your name, phone, cover letter and CV removed from them. This cannot be undone.",
     privacy: "Read the privacy policy",
     signOutTitle: "Sign out",
     signOut: "Sign out of this device",

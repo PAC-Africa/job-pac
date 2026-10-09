@@ -2,10 +2,12 @@ import Link from "next/link";
 import { Download, Shield, Trash2 } from "lucide-react";
 import { ToastFromSearchParams } from "@/components/toast-from-search-params";
 import { AppearancePicker } from "@/components/appearance-picker";
+import { ConfirmAction } from "@/components/confirm-action";
 import { dash, site } from "@/lib/content";
 import { navFor, roleLabel } from "@/lib/dashboard-nav";
 import {
   changePassword,
+  deleteSeekerAccount,
   updateDashboardPrefs,
   updateNotificationPrefs,
 } from "@/app/dashboard/settings-actions";
@@ -263,17 +265,35 @@ export function SettingsPanel({
           )}
 
           <div>
-            <a
-              href={`mailto:hello@pac.africa?subject=${encodeURIComponent(
-                "Data deletion request"
-              )}&body=${encodeURIComponent(
-                `Please delete the data held for ${profile.email}.`
-              )}`}
-              className="btn-ghost border-line"
-            >
-              <Trash2 className="h-4 w-4" aria-hidden />
-              {dash.settings.dataDelete}
-            </a>
+            {profile.role === "seeker" ? (
+              <ConfirmAction
+                action={deleteSeekerAccount}
+                fields={{}}
+                tone="danger"
+                title={dash.settings.dataDeleteConfirmTitle}
+                body={dash.settings.dataDeleteConfirmBody}
+                confirmLabel={dash.settings.dataDeleteCta}
+                triggerClassName="btn-ghost border-line"
+                trigger={
+                  <>
+                    <Trash2 className="h-4 w-4" aria-hidden />
+                    {dash.settings.dataDeleteCta}
+                  </>
+                }
+              />
+            ) : (
+              <a
+                href={`mailto:hello@pac.africa?subject=${encodeURIComponent(
+                  "Data deletion request"
+                )}&body=${encodeURIComponent(
+                  `Please delete the data held for ${profile.email}.`
+                )}`}
+                className="btn-ghost border-line"
+              >
+                <Trash2 className="h-4 w-4" aria-hidden />
+                {dash.settings.dataDelete}
+              </a>
+            )}
             <p className="mt-1.5 max-w-lg text-xs leading-relaxed text-muted">
               {dash.settings.dataDeleteHint}
             </p>
