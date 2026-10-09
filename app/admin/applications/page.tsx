@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { unstable_cache } from "next/cache";
-import { Search, ChevronLeft, ChevronRight, Phone, Mail, SlidersHorizontal } from "lucide-react";
+import { Search, ChevronLeft, ChevronRight, Phone, Mail, SlidersHorizontal, Download } from "lucide-react";
 import { requireProfile } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -25,6 +25,7 @@ import { reviewSummaries, reviewSummaryFor } from "@/lib/application-reviews";
 import { cvStatus } from "@/lib/cv";
 import { dash } from "@/lib/content";
 import { displayApplicant } from "@/lib/utils";
+import { buildApplicationsQuery, STATUSES } from "@/lib/admin-applications-query";
 import type { ApplicationStatus } from "@/types/database";
 
 const PER_PAGE = 50;
@@ -112,21 +113,37 @@ interface Params {
   reviewed?: string;
 }
 
-// under_review is included now that migration 014 added it.
-const STATUSES: ApplicationStatus[] = [
-  "pending",
-  "under_review",
-  "shortlisted",
-  "rejected",
-  "hired",
-];
-
 function href(current: Params, changes: Partial<Record<keyof Params, string | null>>) {
   const next = new URLSearchParams();
   const merged = { ...current, ...changes } as Record<string, string | null | undefined>;
   for (const [key, value] of Object.entries(merged)) if (value) next.set(key, value);
   const qs = next.toString();
   return qs ? `/admin/applications?${qs}` : "/admin/applications";
+}
+
+// Matches ApplicationFilterParams in lib/admin-applications-query.ts — only
+// the actual filters, not pagination/drawer state (page, id, updated,
+// reviewed), so the export link reflects what's filtered, not what's open.
+const EXPORT_PARAM_KEYS = [
+  "q",
+  "status",
+  "source",
+  "cv",
+  "year",
+  "employer",
+  "claimed",
+  "review",
+  "meets",
+] as const;
+
+function exportHref(current: Params) {
+  const next = new URLSearchParams();
+  for (const key of EXPORT_PARAM_KEYS) {
+    const value = current[key];
+    if (value) next.set(key, value);
+  }
+  const qs = next.toString();
+  return qs ? `/admin/applications/export?${qs}` : "/admin/applications/export";
 }
 
 export default async function AdminApplicationsPage({
@@ -140,95 +157,7 @@ export default async function AdminApplicationsPage({
   const page = Math.max(1, Number.parseInt(params.page ?? "1", 10) || 1);
   const from = (page - 1) * PER_PAGE;
 
-  let query = supabase
-    .from("applications")
-    .select(
-      `id, applicant_name, applicant_email, applicant_phone, cover_letter, cv_url,
-       status, employer_note, wp_post_id, wp_job_title, applied_at, applicant_id,
-       meets_requirements, job:jobs(title, slug)`,
-      { count: "exact" }
-    )
-    .order("applied_at", { ascending: false });
-
-  if (params.q) {
-    // Applicants are searched by the three things an admin actually knows: who
-    // they are, how to reach them, and what they applied for. wp_job_title is
-    // included because job_id is NULL for every migrated row, so the free-text
-    // snapshot is the only role name those 4,355 records carry.
-    const term = params.q.replace(/[%,()]/g, " ").trim();
-    if (term) {
-      query = query.or(
-        `applicant_name.ilike.%${term}%,applicant_email.ilike.%${term}%,wp_job_title.ilike.%${term}%`
-      );
-    }
-  }
-
-  if (params.status && (STATUSES as string[]).includes(params.status)) {
-    query = query.eq("status", params.status as ApplicationStatus);
-  }
-
-  // Historical rows are exactly the ones carrying a WordPress post id.
-  if (params.source === "historical") query = query.not("wp_post_id", "is", null);
-  if (params.source === "new") query = query.is("wp_post_id", null);
-
-  // "migrated" now means anywhere we host it — Supabase for new uploads, R2 for
-  // the recovered archive. Only an http:// value is still unreachable.
-  if (params.cv === "legacy") query = query.like("cv_url", "http%");
-  if (params.cv === "migrated") {
-    query = query.not("cv_url", "is", null).not("cv_url", "like", "http%");
-  }
-  if (params.cv === "none") query = query.is("cv_url", null);
-
-  // Whether the applicant has an account attached. Every archive row starts
-  // unclaimed, so this is how you find who has come back and reconnected.
-  if (params.claimed === "yes") query = query.not("applicant_id", "is", null);
-  if (params.claimed === "no") query = query.is("applicant_id", null);
-
-  // Flag, not filter-out: sorted via the order() below rather than excluded,
-  // per the "never hide, only flag" decision (migration 033).
-  if (params.meets === "1") query = query.eq("meets_requirements", true);
-  if (params.meets === "0") query = query.eq("meets_requirements", false);
-
-  if (params.review === "unreviewed" || params.review === "seen" || params.review === "final") {
-    const { data: reviewRows } = await supabase
-      .from("application_reviews")
-      .select("application_id, mode");
-    const rows = (reviewRows ?? []) as { application_id: string; mode: string }[];
-    const anyIds = [...new Set(rows.map((r) => r.application_id))];
-    const finalIds = [...new Set(rows.filter((r) => r.mode === "final").map((r) => r.application_id))];
-    const NONE = "00000000-0000-0000-0000-000000000000";
-    if (params.review === "unreviewed") {
-      query = anyIds.length ? query.not("id", "in", `(${anyIds.join(",")})`) : query;
-    } else if (params.review === "seen") {
-      query = query.in("id", anyIds.length ? anyIds : [NONE]);
-    } else {
-      query = query.in("id", finalIds.length ? finalIds : [NONE]);
-    }
-  }
-
-  const year = Number.parseInt(params.year ?? "", 10);
-  if (Number.isFinite(year) && year > 2000 && year < 2100) {
-    query = query
-      .gte("applied_at", `${year}-01-01`)
-      .lt("applied_at", `${year + 1}-01-01`);
-  }
-
-  // Employer filter resolves to job ids first rather than filtering through the
-  // embedded resource: PostgREST needs an !inner join for that, which would
-  // silently drop every archive row (job_id is NULL on all 4,355 of them).
-  if (params.employer) {
-    const { data: employerJobs } = await supabase
-      .from("jobs")
-      .select("id")
-      .eq("company_id", params.employer);
-    const ids = ((employerJobs as { id: string }[] | null) ?? []).map((j) => j.id);
-    // No jobs means no applications — an impossible id keeps the result empty
-    // rather than silently ignoring the filter.
-    query = query.in("job_id", ids.length ? ids : [
-      "00000000-0000-0000-0000-000000000000",
-    ]);
-  }
-
+  const { query } = await buildApplicationsQuery(supabase, params);
   const { data, count, error } = await query.range(from, from + PER_PAGE - 1);
 
   const rows = (data ?? []) as unknown as Row[];
@@ -310,6 +239,12 @@ export default async function AdminApplicationsPage({
         eyebrow="PAC Africa · Internal"
         title={dash.admin.applicationsTitle}
         sub={dash.admin.applicationsSub}
+        action={
+          <Link href={exportHref(params)} className="btn-secondary text-xs">
+            <Download className="h-3.5 w-3.5" aria-hidden />
+            Export CSV
+          </Link>
+        }
       />
 
       {/* SEARCH ------------------------------------------------------- */}
